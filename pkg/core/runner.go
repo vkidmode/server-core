@@ -27,11 +27,24 @@ func (r *recoverWrapper) run(ctx context.Context) (err error) {
 	defer func() {
 		cancel()
 		if recoverErr := recover(); recoverErr != nil {
-			err = fmt.Errorf("%w: %v", panicError, recoverErr.(string))
+			err = fmt.Errorf("%w: %v", panicError, panicToString(recoverErr))
 		}
 		<-runnerCtx.Done()
 	}()
 
 	err = r.runner(runnerCtx)
 	return
+}
+
+func panicToString(panicErr interface{}) string {
+	if panicErr == nil {
+		return ""
+	}
+	switch e := panicErr.(type) {
+	case string:
+		return e
+	case []byte:
+		return string(e)
+	}
+	return fmt.Sprintf("%+v", panicErr)
 }
