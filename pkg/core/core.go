@@ -56,6 +56,7 @@ func (c *core) Launch(ctx context.Context) error {
 	select {
 	case err := <-c.errorStack:
 		if err != nil {
+			c.stop()
 			return err
 		}
 	case <-ctx.Done():
