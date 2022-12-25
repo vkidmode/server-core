@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"strings"
 )
 
@@ -58,7 +59,7 @@ func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) error {
 		return err
 	}
 
-	c.logger.Log(ctx, fmt.Sprintf("panic happened: %s", err.Error()))
+	c.logger.Log(ctx, fmt.Sprintf("panic happened: %s", err.Error()+string(debug.Stack())))
 
 	c.runnableStack <- wrapper
 	return nil
