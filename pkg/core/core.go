@@ -8,7 +8,7 @@ import (
 
 type Core interface {
 	Launch(ctx context.Context) error
-	AddRunner(in runner)
+	AddRunner(in Runner)
 }
 
 func NewCore() Core {
@@ -23,7 +23,7 @@ type core struct {
 	errorStack    chan error
 }
 
-func (c *core) AddRunner(in runner) {
+func (c *core) AddRunner(in Runner) {
 	c.runnableStack <- newRecoverWrapper(in)
 }
 

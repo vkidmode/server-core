@@ -9,9 +9,9 @@ var (
 	panicError = fmt.Errorf("panic happened")
 )
 
-type runner func(ctx context.Context) error
+type Runner func(ctx context.Context) error
 
-func newRecoverWrapper(runnerItem runner) recoverWrapper {
+func newRecoverWrapper(runnerItem Runner) recoverWrapper {
 	return recoverWrapper{
 		runner: runnerItem,
 	}
