@@ -3,7 +3,10 @@ package core
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 type WriteLog interface {
@@ -28,6 +31,7 @@ type core struct {
 	runnableStack chan recoverWrapper
 	errorStack    chan error
 	logger        WriteLog
+	cancel        context.CancelFunc
 }
 
 func (c *core) AddRunner(in Runner) {
@@ -35,6 +39,11 @@ func (c *core) AddRunner(in Runner) {
 }
 
 func (c *core) Launch(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+
+	go c.waitForInterruption()
+
 	go func(*core) {
 		for stackItem := range c.runnableStack {
 			item := stackItem
@@ -44,12 +53,28 @@ func (c *core) Launch(ctx context.Context) error {
 		}
 	}(c)
 
-	for err := range c.errorStack {
+	select {
+	case err := <-c.errorStack:
 		if err != nil {
 			return err
 		}
+	case <-ctx.Done():
+		return nil
 	}
 	return nil
+}
+
+func (c *core) waitForInterruption() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	<-ch
+	c.stop()
+}
+
+func (c *core) stop() {
+	if c.cancel != nil {
+		c.cancel()
+	}
 }
 
 func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) error {

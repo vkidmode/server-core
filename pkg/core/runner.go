@@ -23,17 +23,17 @@ type recoverWrapper struct {
 }
 
 func (r *recoverWrapper) run(ctx context.Context) (err error) {
-	runnerCtx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(ctx)
 
 	defer func() {
 		cancel()
 		if recoverErr := recover(); recoverErr != nil {
 			err = fmt.Errorf("%w: %v\n%s", panicError, panicToString(recoverErr), string(debug.Stack()))
 		}
-		<-runnerCtx.Done()
+		<-ctx.Done()
 	}()
 
-	err = r.runner(runnerCtx)
+	err = r.runner(ctx)
 	return
 }
 
