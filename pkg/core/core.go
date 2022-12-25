@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type WriteLog interface {
@@ -18,20 +19,25 @@ type Core interface {
 	AddRunner(in Runner)
 }
 
-// NewCore logger is optional field, can be nil
-func NewCore(logger WriteLog) Core {
-	return &core{
-		runnableStack: make(chan recoverWrapper, 10),
-		errorStack:    make(chan error, 10),
-		logger:        logger,
-	}
+type core struct {
+	runnableStack            chan recoverWrapper // stack with jobs need to run
+	errorStack               chan error          // stack with errors
+	logger                   WriteLog            // you can use this logger for custom logging
+	cancel                   context.CancelFunc  // context.Cancel func
+	timeout                  time.Duration       // time when forced termination will happen after crushing
+	workersCount             uint8               // count of currently running workers
+	workerGracefulStopSignal chan interface{}    // the channel with all launch signals
 }
 
-type core struct {
-	runnableStack chan recoverWrapper
-	errorStack    chan error
-	logger        WriteLog
-	cancel        context.CancelFunc
+// NewCore logger is optional field, can be nil
+func NewCore(logger WriteLog, timeout time.Duration, runnersCount uint8) Core {
+	return &core{
+		runnableStack:            make(chan recoverWrapper, runnersCount),
+		errorStack:               make(chan error, runnersCount),
+		workerGracefulStopSignal: make(chan interface{}, runnersCount),
+		logger:                   logger,
+		timeout:                  timeout,
+	}
 }
 
 func (c *core) AddRunner(in Runner) {
@@ -53,6 +59,8 @@ func (c *core) Launch(ctx context.Context) error {
 		}
 	}(c)
 
+	defer c.wait()
+
 	for {
 		select {
 		case err := <-c.errorStack:
@@ -62,6 +70,23 @@ func (c *core) Launch(ctx context.Context) error {
 			}
 		case <-ctx.Done():
 			return nil
+		}
+	}
+}
+
+func (c *core) wait() {
+	timeout, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	for {
+		select {
+		case <-timeout.Done():
+			return
+		default:
+			if c.workersCount == 0 {
+				return
+			}
+			c.readStopSignal()
 		}
 	}
 }
@@ -80,8 +105,11 @@ func (c *core) stop() {
 }
 
 func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) error {
+	c.incWorkersCount()
+
 	err := wrapper.run(ctx)
 	if err == nil || !strings.Contains(err.Error(), panicError.Error()) {
+		c.genStopSignal()
 		return err
 	}
 
@@ -89,4 +117,17 @@ func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) error {
 
 	c.runnableStack <- wrapper
 	return nil
+}
+
+func (c *core) readStopSignal() {
+	<-c.workerGracefulStopSignal
+	c.workersCount--
+}
+
+func (c *core) incWorkersCount() {
+	c.workersCount++
+}
+
+func (c *core) genStopSignal() {
+	c.workerGracefulStopSignal <- nil
 }
