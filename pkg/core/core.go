@@ -53,16 +53,17 @@ func (c *core) Launch(ctx context.Context) error {
 		}
 	}(c)
 
-	select {
-	case err := <-c.errorStack:
-		if err != nil {
-			c.stop()
-			return err
+	for {
+		select {
+		case err := <-c.errorStack:
+			if err != nil {
+				c.stop()
+				return err
+			}
+		case <-ctx.Done():
+			return nil
 		}
-	case <-ctx.Done():
-		return nil
 	}
-	return nil
 }
 
 func (c *core) waitForInterruption() {
