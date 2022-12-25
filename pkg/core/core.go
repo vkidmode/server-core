@@ -4,9 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
-
-	"golang.org/x/sync/errgroup"
 )
 
 type Core interface {
@@ -17,11 +14,13 @@ type Core interface {
 func NewCore() Core {
 	return &core{
 		runnableStack: make(chan recoverWrapper, 10),
+		errorStack:    make(chan error, 10),
 	}
 }
 
 type core struct {
 	runnableStack chan recoverWrapper
+	errorStack    chan error
 }
 
 func (c *core) AddRunner(in runner) {
@@ -29,30 +28,34 @@ func (c *core) AddRunner(in runner) {
 }
 
 func (c *core) Launch(ctx context.Context) error {
-	eg, ctx := errgroup.WithContext(ctx)
-
 	go func(*core) {
 		for stackItem := range c.runnableStack {
-			fmt.Println("here")
-			eg.Go(c.rerunIfPanic(ctx, stackItem))
+			item := stackItem
+			go func(recoverWrapper) {
+				c.errorStack <- c.rerunIfPanic(ctx, item)
+			}(item)
 		}
 	}(c)
 
-	time.Sleep(1 * time.Second)
-
-	return eg.Wait()
-}
-
-func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) func() error {
-	return func() error {
-		err := wrapper.run(ctx)
-		if err == nil || !strings.Contains(err.Error(), panicError.Error()) {
+	for err := range c.errorStack {
+		if err != nil {
 			return err
 		}
-
-		// logger should be here
-
-		c.runnableStack <- wrapper
-		return nil
 	}
+	return nil
+}
+
+func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) error {
+	err := wrapper.run(ctx)
+	if err == nil || !strings.Contains(err.Error(), panicError.Error()) {
+		if err != nil {
+			fmt.Println(err)
+		}
+		return err
+	}
+
+	fmt.Println("panic happened")
+
+	c.runnableStack <- wrapper
+	return nil
 }
