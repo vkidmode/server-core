@@ -59,7 +59,7 @@ func (c *core) Launch(ctx context.Context) error {
 		}
 	}(c)
 
-	defer c.wait()
+	defer c.waitGraceful()
 
 	for {
 		select {
@@ -74,20 +74,15 @@ func (c *core) Launch(ctx context.Context) error {
 	}
 }
 
-func (c *core) wait() {
+func (c *core) waitGraceful() {
 	timeout, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
 	for {
-		select {
-		case <-timeout.Done():
+		if c.workersCount == 0 {
 			return
-		default:
-			if c.workersCount == 0 {
-				return
-			}
-			c.readStopSignal()
 		}
+		c.readStopSignal(timeout)
 	}
 }
 
@@ -113,15 +108,21 @@ func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) error {
 		return err
 	}
 
-	c.logger.Log(ctx, fmt.Sprintf("panic happened: %s", err.Error()))
+	if c.logger != nil {
+		c.logger.Log(ctx, fmt.Sprintf("panic happened: %s", err.Error()))
+	}
 
 	c.runnableStack <- wrapper
 	return nil
 }
 
-func (c *core) readStopSignal() {
-	<-c.workerGracefulStopSignal
-	c.workersCount--
+func (c *core) readStopSignal(timeoutCtx context.Context) {
+	select {
+	case <-timeoutCtx.Done():
+		c.workersCount = 0
+	case <-c.workerGracefulStopSignal:
+		c.workersCount--
+	}
 }
 
 func (c *core) incWorkersCount() {
