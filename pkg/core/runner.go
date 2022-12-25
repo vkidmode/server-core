@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 )
 
 var (
@@ -27,7 +28,7 @@ func (r *recoverWrapper) run(ctx context.Context) (err error) {
 	defer func() {
 		cancel()
 		if recoverErr := recover(); recoverErr != nil {
-			err = fmt.Errorf("%w: %v", panicError, panicToString(recoverErr))
+			err = fmt.Errorf("%w: %v\n%s", panicError, panicToString(recoverErr), string(debug.Stack()))
 		}
 		<-runnerCtx.Done()
 	}()
