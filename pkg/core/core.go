@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"reflect"
+	"runtime"
 	"runtime/debug"
 	"time"
 )
@@ -16,7 +18,6 @@ type runner func(ctx context.Context) error
 
 type Core struct {
 	options       *options
-	errorCallback func(error)
 	panicCallback func(string)
 }
 
@@ -31,19 +32,15 @@ func NewCore(opts ...Option) *Core {
 	}
 }
 
-func (c *Core) SetErrorCallback(callback func(error)) {
-	c.errorCallback = callback
-}
-
 func (c *Core) SetPanic(callback func(string)) {
 	c.panicCallback = callback
 }
 
-func (c *Core) Launch(ctx context.Context, runners ...runner) {
+func (c *Core) Launch(ctx context.Context, runners ...runner) error {
 	childCtx, childCancel := context.WithCancel(ctx)
 
 	runnersChan := make(chan runner)
-	go c.launch(childCtx, runnersChan)
+	runnerErrChan := c.launch(childCtx, runnersChan)
 
 	for _, r := range runners {
 		runnersChan <- wrap(r)
@@ -65,55 +62,64 @@ func (c *Core) Launch(ctx context.Context, runners ...runner) {
 
 	go func() {
 		<-ctx.Done()
+		childCancel()
 		wait <- struct{}{}
 	}()
 
-	<-wait
-	childCancel()
+	select {
+	case <-wait:
+	case err := <-runnerErrChan:
+		childCancel()
+		fmt.Println("DEBUG")
+		return err
+	}
+
+	return nil
 }
 
-func (c *Core) launch(ctx context.Context, runnersChan chan runner) {
-	for r := range runnersChan {
-		go func(r runner) {
-			if err := r(ctx); err != nil {
-				if !errors.Is(err, errPanic) {
-					if c.options.enabledRerunWhenErrs {
-						runnersChan <- r
+func (c *Core) launch(ctx context.Context, runnersChan chan runner) chan error {
+	runnerErrs := make(chan error)
+	go func() {
+		for r := range runnersChan {
+			go func(r runner) {
+				if err := r(ctx); err != nil {
+					if !errors.Is(err, errPanic) {
+						runnerErrs <- err
+						return
 					}
 
-					if c.errorCallback != nil {
-						c.errorCallback(err)
+					if c.panicCallback != nil {
+						c.panicCallback(err.Error())
 					}
-					return
-				}
 
-				if c.panicCallback != nil {
-					c.panicCallback(errPanic.Error())
+					runnersChan <- r
 				}
+			}(r)
+		}
+	}()
 
-				runnersChan <- r
-			}
-		}(r)
-	}
+	return runnerErrs
 }
 
 func wrap(r runner) runner {
 	return func(ctx context.Context) (err error) {
 		defer func() {
-			recoverErr := recover()
-			if nil == recoverErr {
+			if recoverErr := recover(); recoverErr != nil {
+				var panicMsg string
+				switch msg := recoverErr.(type) {
+				case string:
+					panicMsg = msg
+				case []byte:
+					panicMsg = string(msg)
+				}
+
+				err = fmt.Errorf("%w: %v %s", errPanic, fmt.Sprintf("%+v", panicMsg), string(debug.Stack()))
 				return
 			}
 
-			var panicMsg string
-			switch msg := recoverErr.(type) {
-			case string:
-				panicMsg = msg
-			case []byte:
-				panicMsg = string(msg)
+			if err != nil {
+				err = fmt.Errorf("%s: %w", runtime.FuncForPC(reflect.ValueOf(r).Pointer()).Name(), err)
 			}
-
-			err = fmt.Errorf("%w: %v %s", errPanic, fmt.Sprintf("%+v", panicMsg), string(debug.Stack()))
 		}()
 
 		return r(ctx)

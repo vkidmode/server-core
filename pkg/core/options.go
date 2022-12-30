@@ -8,20 +8,19 @@ import (
 type Option func(o *options)
 
 type options struct {
-	gracefulSignals      []os.Signal
-	gracefulDelay        *time.Duration
-	enabledRerunWhenErrs bool
+	gracefulSignals []os.Signal
+	gracefulDelay   *time.Duration
 }
 
-func WithEnabledRerunWhenErrs() Option {
+func WithGracefulDelay(delay time.Duration) Option {
 	return func(o *options) {
-		o.enabledRerunWhenErrs = true
+		o.gracefulDelay = &delay
 	}
 }
 
-func WithGraceful(delay time.Duration, signals ...os.Signal) Option {
+func WithGracefulOsSignals(signals ...os.Signal) Option {
 	return func(o *options) {
-		o.gracefulDelay = &delay
+		o.gracefulSignals = make([]os.Signal, 0, len(signals))
 		for _, signal := range signals {
 			o.gracefulSignals = append(o.gracefulSignals, signal)
 		}
