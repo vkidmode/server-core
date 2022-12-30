@@ -70,7 +70,6 @@ func (c *Core) Launch(ctx context.Context, runners ...runner) error {
 	case <-wait:
 	case err := <-runnerErrChan:
 		childCancel()
-		fmt.Println("DEBUG")
 		return err
 	}
 
