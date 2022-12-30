@@ -15,7 +15,6 @@ var errPanic = errors.New("panic")
 type runner func(ctx context.Context) error
 
 type Core struct {
-	runners       chan runner
 	options       *options
 	errorCallback func(error)
 	panicCallback func(string)
@@ -28,60 +27,73 @@ func NewCore(opts ...Option) *Core {
 	}
 
 	return &Core{
-		runners: make(chan runner),
 		options: &options,
 	}
 }
 
-func (c *Core) Add(runners ...runner) {
-	for _, r := range runners {
-		c.runners <- wrap(r)
-	}
+func (c *Core) SetErrorCallback(callback func(error)) {
+	c.errorCallback = callback
 }
 
-func (c *Core) Launch(ctx context.Context) {
+func (c *Core) SetPanic(callback func(string)) {
+	c.panicCallback = callback
+}
+
+func (c *Core) Launch(ctx context.Context, runners ...runner) {
 	childCtx, childCancel := context.WithCancel(ctx)
-	runnersErrs := make(chan error)
-	go func() {
-		for r := range c.runners {
-			go func(r runner) {
-				if err := r(childCtx); err != nil {
-					if !errors.Is(err, errPanic) {
-						runnersErrs <- err
-						return
-					}
 
-					if c.panicCallback != nil {
-						c.panicCallback(errPanic.Error())
-					}
+	runnersChan := make(chan runner)
+	go c.launch(childCtx, runnersChan)
 
-					c.runners <- r
-				}
-			}(r)
-		}
-	}()
+	for _, r := range runners {
+		runnersChan <- wrap(r)
+	}
 
-	osSignal := make(chan os.Signal)
-	go func() {
-		signal.Notify(osSignal, c.options.gracefulSignals...)
-	}()
-
-	for {
-		select {
-		case <-osSignal:
+	wait := make(chan struct{})
+	if len(c.options.gracefulSignals) > 0 {
+		go func() {
+			osSignal := make(chan os.Signal)
+			signal.Notify(osSignal, c.options.gracefulSignals...)
+			<-osSignal
 			childCancel()
 			if c.options.gracefulDelay != nil {
 				time.Sleep(*c.options.gracefulDelay)
 			}
-			return
-		case <-ctx.Done():
-			childCancel()
-			return
-		case err := <-runnersErrs:
-			if c.errorCallback != nil {
-				c.errorCallback(err)
+			wait <- struct{}{}
+		}()
+	}
+
+	go func() {
+		<-ctx.Done()
+		wait <- struct{}{}
+	}()
+
+	<-wait
+	childCancel()
+}
+
+func (c *Core) launch(ctx context.Context, runnersChan chan runner) {
+	for r := range runnersChan {
+		go func(r runner) {
+			if err := r(ctx); err != nil {
+				if !errors.Is(err, errPanic) {
+					if c.options.enabledRerunWhenErrs {
+						runnersChan <- r
+					}
+
+					if c.errorCallback != nil {
+						c.errorCallback(err)
+					}
+					return
+				}
+
+				if c.panicCallback != nil {
+					c.panicCallback(errPanic.Error())
+				}
+
+				runnersChan <- r
 			}
-		}
+		}(r)
 	}
 }
 

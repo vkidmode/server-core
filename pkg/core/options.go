@@ -19,14 +19,9 @@ func WithEnabledRerunWhenErrs() Option {
 	}
 }
 
-func WithGracefulDelay(delay time.Duration) Option {
+func WithGraceful(delay time.Duration, signals ...os.Signal) Option {
 	return func(o *options) {
 		o.gracefulDelay = &delay
-	}
-}
-
-func WithGracefulSignals(signals []os.Signal) Option {
-	return func(o *options) {
 		for _, signal := range signals {
 			o.gracefulSignals = append(o.gracefulSignals, signal)
 		}
