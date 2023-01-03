@@ -2,133 +2,125 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
-	"syscall"
+	"reflect"
+	"runtime"
+	"runtime/debug"
 	"time"
 )
 
-type WriteLog interface {
-	Log(ctx context.Context, message string)
+var errPanic = errors.New("panic")
+
+type runner func(ctx context.Context) error
+
+type Core struct {
+	options       *options
+	panicCallback func(string)
 }
 
-type Core interface {
-	Launch(ctx context.Context) error
-	AddRunner(in Runner)
-}
+func NewCore(opts ...Option) *Core {
+	var options options
+	for _, o := range opts {
+		o(&options)
+	}
 
-type core struct {
-	runnableStack            chan recoverWrapper // stack with jobs need to run
-	errorStack               chan error          // stack with errors
-	logger                   WriteLog            // you can use this logger for custom logging
-	cancel                   context.CancelFunc  // context.Cancel func
-	timeout                  time.Duration       // time when forced termination will happen after crushing
-	workersCount             uint8               // count of currently running workers
-	workerGracefulStopSignal chan interface{}    // the channel with all launch signals
-}
-
-// NewCore logger is optional field, can be nil
-func NewCore(logger WriteLog, timeout time.Duration, runnersCount uint8) Core {
-	return &core{
-		runnableStack:            make(chan recoverWrapper, runnersCount),
-		errorStack:               make(chan error, runnersCount),
-		workerGracefulStopSignal: make(chan interface{}, runnersCount),
-		logger:                   logger,
-		timeout:                  timeout,
+	return &Core{
+		options: &options,
 	}
 }
 
-func (c *core) AddRunner(in Runner) {
-	c.runnableStack <- newRecoverWrapper(in)
+func (c *Core) SetPanic(callback func(string)) {
+	c.panicCallback = callback
 }
 
-func (c *core) Launch(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	c.cancel = cancel
+func (c *Core) Launch(ctx context.Context, runners ...runner) error {
+	childCtx, childCancel := context.WithCancel(ctx)
 
-	go c.waitForInterruption()
+	runnersChan := make(chan runner)
+	runnerErrChan := c.launch(childCtx, runnersChan)
 
-	go func(*core) {
-		for stackItem := range c.runnableStack {
-			item := stackItem
-			go func(recoverWrapper) {
-				c.errorStack <- c.rerunIfPanic(ctx, item)
-			}(item)
-		}
-	}(c)
+	for _, r := range runners {
+		runnersChan <- wrap(r)
+	}
 
-	defer c.waitGraceful()
-
-	for {
-		select {
-		case err := <-c.errorStack:
-			if err != nil {
-				c.stop()
-				return err
+	wait := make(chan struct{})
+	if len(c.options.gracefulSignals) > 0 {
+		go func() {
+			osSignal := make(chan os.Signal)
+			signal.Notify(osSignal, c.options.gracefulSignals...)
+			<-osSignal
+			childCancel()
+			if c.options.gracefulDelay != nil {
+				time.Sleep(*c.options.gracefulDelay)
 			}
-		case <-ctx.Done():
-			return nil
-		}
+			wait <- struct{}{}
+		}()
 	}
-}
 
-func (c *core) waitGraceful() {
-	timeout, cancel := context.WithTimeout(context.Background(), c.timeout)
-	defer cancel()
+	go func() {
+		<-ctx.Done()
+		childCancel()
+		wait <- struct{}{}
+	}()
 
-	for {
-		if c.workersCount == 0 {
-			return
-		}
-		c.readStopSignal(timeout)
-	}
-}
-
-func (c *core) waitForInterruption() {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-	<-ch
-	c.stop()
-}
-
-func (c *core) stop() {
-	if c.cancel != nil {
-		c.cancel()
-	}
-}
-
-func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) error {
-	c.incWorkersCount()
-
-	err := wrapper.run(ctx)
-	if err == nil || !strings.Contains(err.Error(), panicError.Error()) {
-		c.genStopSignal()
+	select {
+	case <-wait:
+	case err := <-runnerErrChan:
+		childCancel()
 		return err
 	}
 
-	if c.logger != nil {
-		c.logger.Log(ctx, fmt.Sprintf("panic happened: %s", err.Error()))
-	}
-
-	c.runnableStack <- wrapper
 	return nil
 }
 
-func (c *core) readStopSignal(timeoutCtx context.Context) {
-	select {
-	case <-timeoutCtx.Done():
-		c.workersCount = 0
-	case <-c.workerGracefulStopSignal:
-		c.workersCount--
+func (c *Core) launch(ctx context.Context, runnersChan chan runner) chan error {
+	runnerErrs := make(chan error)
+	go func() {
+		for r := range runnersChan {
+			go func(r runner) {
+				if err := r(ctx); err != nil {
+					if !errors.Is(err, errPanic) {
+						runnerErrs <- err
+						return
+					}
+
+					if c.panicCallback != nil {
+						c.panicCallback(err.Error())
+					}
+
+					runnersChan <- r
+				}
+			}(r)
+		}
+	}()
+
+	return runnerErrs
+}
+
+func wrap(r runner) runner {
+	return func(ctx context.Context) (err error) {
+		defer func() {
+			if recoverErr := recover(); recoverErr != nil {
+				var panicMsg string
+				switch msg := recoverErr.(type) {
+				case string:
+					panicMsg = msg
+				case []byte:
+					panicMsg = string(msg)
+				}
+
+				err = fmt.Errorf("%w: %v %s", errPanic, fmt.Sprintf("%+v", panicMsg), string(debug.Stack()))
+				return
+			}
+
+			if err != nil {
+				err = fmt.Errorf("%s: %w", runtime.FuncForPC(reflect.ValueOf(r).Pointer()).Name(), err)
+			}
+		}()
+
+		return r(ctx)
 	}
-}
-
-func (c *core) incWorkersCount() {
-	c.workersCount++
-}
-
-func (c *core) genStopSignal() {
-	c.workerGracefulStopSignal <- nil
 }
