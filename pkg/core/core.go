@@ -112,6 +112,7 @@ func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) error {
 		c.logger.Log(ctx, fmt.Sprintf("panic happened: %s", err.Error()))
 	}
 
+	c.decWorkersCount()
 	c.runnableStack <- wrapper
 	return nil
 }
@@ -121,12 +122,16 @@ func (c *core) readStopSignal(timeoutCtx context.Context) {
 	case <-timeoutCtx.Done():
 		c.workersCount = 0
 	case <-c.workerGracefulStopSignal:
-		c.workersCount--
+		c.decWorkersCount()
 	}
 }
 
 func (c *core) incWorkersCount() {
 	c.workersCount++
+}
+
+func (c *core) decWorkersCount() {
+	c.workersCount--
 }
 
 func (c *core) genStopSignal() {
