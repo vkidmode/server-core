@@ -12,14 +12,16 @@ var (
 
 type Runner func(ctx context.Context) error
 
-func newRecoverWrapper(runnerItem Runner) recoverWrapper {
+func newRecoverWrapper(runnerItem Runner, runnerTypeWorker bool) recoverWrapper {
 	return recoverWrapper{
-		runner: runnerItem,
+		runner:           runnerItem,
+		runnerTypeWorker: runnerTypeWorker,
 	}
 }
 
 type recoverWrapper struct {
-	runner func(ctx context.Context) error
+	runner           func(ctx context.Context) error
+	runnerTypeWorker bool
 }
 
 func (r *recoverWrapper) run(ctx context.Context) (err error) {

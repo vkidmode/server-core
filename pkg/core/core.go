@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -16,7 +17,7 @@ type WriteLog interface {
 
 type Core interface {
 	Launch(ctx context.Context) error
-	AddRunner(in Runner)
+	AddRunner(in Runner, runnerTypeWorker bool)
 }
 
 type core struct {
@@ -25,8 +26,9 @@ type core struct {
 	logger                   WriteLog            // you can use this logger for custom logging
 	cancel                   context.CancelFunc  // context.Cancel func
 	timeout                  time.Duration       // time when forced termination will happen after crushing
-	workersCount             uint8               // count of currently running workers
+	workersCount             int32               // count of currently running workers
 	workerGracefulStopSignal chan interface{}    // the channel with all launch signals
+	runnerTypeWorker         int32
 }
 
 // NewCore logger is optional field, can be nil
@@ -40,8 +42,8 @@ func NewCore(logger WriteLog, timeout time.Duration, runnersCount uint8) Core {
 	}
 }
 
-func (c *core) AddRunner(in Runner) {
-	c.runnableStack <- newRecoverWrapper(in)
+func (c *core) AddRunner(in Runner, runnerTypeWorker bool) {
+	c.runnableStack <- newRecoverWrapper(in, runnerTypeWorker)
 }
 
 func (c *core) Launch(ctx context.Context) error {
@@ -54,7 +56,18 @@ func (c *core) Launch(ctx context.Context) error {
 		for stackItem := range c.runnableStack {
 			item := stackItem
 			go func(recoverWrapper) {
+				if item.runnerTypeWorker {
+					atomic.AddInt32(&c.runnerTypeWorker, 1)
+				}
+
 				c.errorStack <- c.rerunIfPanic(ctx, item)
+
+				if item.runnerTypeWorker {
+					atomic.AddInt32(&c.runnerTypeWorker, -1)
+				}
+				if c.runnerTypeWorker == 0 {
+					cancel()
+				}
 			}(item)
 		}
 	}(c)
@@ -112,26 +125,28 @@ func (c *core) rerunIfPanic(ctx context.Context, wrapper recoverWrapper) error {
 		c.logger.Log(ctx, fmt.Sprintf("panic happened: %s", err.Error()))
 	}
 
-	c.decWorkersCount()
+	time.Sleep(100 * time.Millisecond)
 	c.runnableStack <- wrapper
+	time.Sleep(100 * time.Millisecond)
+	c.decWorkersCount()
 	return nil
 }
 
 func (c *core) readStopSignal(timeoutCtx context.Context) {
 	select {
 	case <-timeoutCtx.Done():
-		c.workersCount = 0
+		atomic.StoreInt32(&c.workersCount, 0)
 	case <-c.workerGracefulStopSignal:
 		c.decWorkersCount()
 	}
 }
 
 func (c *core) incWorkersCount() {
-	c.workersCount++
+	atomic.AddInt32(&c.workersCount, 1)
 }
 
 func (c *core) decWorkersCount() {
-	c.workersCount--
+	atomic.AddInt32(&c.workersCount, -1)
 }
 
 func (c *core) genStopSignal() {
