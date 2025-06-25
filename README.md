@@ -4,7 +4,7 @@ This is package to create workers pull with graceful shutdown and panics catcher
 
 ### Tu use it import package:
 
-```go get github.com/vkidmode/server-core/pkg/core```
+```go get github.com/tarmalonchik/server-core/pkg/core```
 
 ### Create new server item with: 
 
